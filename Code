@@ -1,0 +1,120 @@
+#include "max6675.h"
+
+// Pin assignments for thermocouples
+int thermocoupleDataPin1 = 12;
+int thermocoupleCSPin1 = 5;
+int thermocoupleClockPin1 = 13;
+int thermocoupleDataPin2 = 12;
+int thermocoupleCSPin2 = 6;
+int thermocoupleClockPin2 = 13;
+// Pin for LM35 temperature sensor
+int lm35Pin = A3;
+// Thermocouple objects for temperature measurements
+MAX6675 thermocouple1(thermocoupleClockPin1, thermocoupleCSPin1, thermocoupleDataPin1);
+MAX6675 thermocouple2(thermocoupleClockPin2, thermocoupleCSPin2, thermocoupleDataPin2);
+// Analog input pins for feedback and control
+int buckFeedbackPin = A4;
+int buckTempControlPin = A1;
+int boostReferenceVoltagePin = A0;
+
+int boostPWMDutyCycle = 0;
+float boostReferenceVoltage = 85.00;
+
+unsigned long previousMillis = 0;
+const long logInterval = 10000;  // Interval for logging data (10 seconds)
+
+void setup() {
+  Serial.begin(9600);
+  // Configure PWM pins
+  pinMode(9, OUTPUT);
+  pinMode(10, OUTPUT);
+  
+  // Set up Timer1 for Fast PWM at 37.5 kHz
+  noInterrupts(); // Temporarily disable interrupts
+
+  TCCR1A = 0; // Clear Timer1 control registers
+  TCCR1B = 0;
+  TCNT1 = 0;  // Reset Timer1 counter
+
+  // Set Fast PWM mode with ICR1 as top
+  TCCR1A |= (1 << WGM11);
+  TCCR1B |= (1 << WGM13) | (1 << WGM12) | (1 << CS10);
+
+  // Set ICR1 value to achieve 37.5 kHz frequency
+  ICR1 = 425;
+
+  // Enable PWM output on pins 9 (OC1A) and 10 (OC1B)
+  TCCR1A |= (1 << COM1A1) | (1 << COM1B1);
+
+  interrupts(); // Re-enable interrupts
+}
+void loop() {
+  boostConverterControl();
+  buckConverterControl();
+  // Read and map feedback from buck converter
+  int rawBuckFeedback = analogRead(buckFeedbackPin);
+  int mappedBuckFeedback = map(rawBuckFeedback, 100, 1000, 42, 0);
+  // Log sensor readings and system state at regular intervals
+  if (millis() - previousMillis >= logInterval) {
+    previousMillis = millis();
+    // Log data to serial
+    Serial.print("Ambient Temperature: ");
+    Serial.print(read_Temperature(lm35Pin));
+    Serial.print("C_aluminium = ");
+    Serial.print(thermocouple1.readCelsius());
+    Serial.print(" || C_heat_sink = ");
+    Serial.println(thermocouple2.readCelsius());
+
+    Serial.print(" || Boost Duty Cycle : ");
+    Serial.print((OCR1B * 100) / 425);
+    Serial.print("%");
+
+    Serial.print(" || Boost Voltage : ");
+    Serial.print(((4.0 / 425.0) * OCR1B) * 11);
+    
+    Serial.print(" || Buck Duty Cycle : ");
+    Serial.print(100.00 - ((rawBuckFeedback / 1023.00) * 100));
+    Serial.print("%");
+
+    Serial.print(" || Buck Output Voltage : ");
+    Serial.println(mappedBuckFeedback * 0.11);
+  }
+}
+//Function to get average ambient temperature
+float read_Temperature(int pin) {
+  long sum = 0; // To accumulate the total value of samples  
+  // Take multiple samples and accumulate the total
+  for (int i = 0; i < 4; i++) {
+    int sensorValue = analogRead(pin); 
+    sum += sensorValue; // Accumulate the sensor values
+    delay(10); // Short delay between samples to allow the sensor to stabilize
+  }
+  // Compute the average value
+  float averageValue = sum / 4;
+  float voltage = averageValue * (5.0 / 1023.0); // Convert the average value to voltage
+  float temperature = voltage * 100.0; // Convert the voltage to temperature in Celsius  
+  return temperature;
+}
+// Control logic for the buck converter
+void buckConverterControl() {
+  float tempControlValue = analogRead(buckTempControlPin);
+  float pwmValue = map(tempControlValue, 0, 1023, 0, 425);
+  OCR1A = pwmValue;  // Set PWM duty cycle for buck converter
+}
+// Control logic for the boost converter
+void boostConverterControl() {
+  float referenceVoltage = analogRead(boostReferenceVoltagePin);
+  float pwmValue = map(referenceVoltage, 0, 1023, 0, 425);
+  if (pwmValue < 10) {
+    boostPWMDutyCycle = 0;
+  } else {
+    if (boostReferenceVoltage > pwmValue) {
+      boostPWMDutyCycle = boostPWMDutyCycle + 1;
+      boostPWMDutyCycle = constrain(boostPWMDutyCycle, 1, 424);
+    } else if (boostReferenceVoltage < pwmValue) {
+      boostPWMDutyCycle = boostPWMDutyCycle - 1;
+      boostPWMDutyCycle = constrain(boostPWMDutyCycle, 1, 424);
+    }
+  }
+  OCR1B = boostPWMDutyCycle;  // Set PWM duty cycle for boost converter
+}
